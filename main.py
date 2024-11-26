@@ -1,125 +1,107 @@
+import os
 import requests
 from bs4 import BeautifulSoup
 import json
-import os
+from urllib.parse import urljoin, urlparse
+from collections import deque
 
-# Fronta na odkazy ke zpracování
-link_queue = ["https://www.ceskenoviny.cz/zpravy/okamura-spd-udela-maximum-aby-koalici-zabranilo-zvysit-platy-politiku/2597461"]  # Startovací URL
-visited_links = set()  # Pro zamezení opakovaného zpracování
 
-# Uložená data
-articles = []
-
-def fetch_page(url):
-    """Stáhne obsah stránky."""
+# Funkce pro stažení stránky
+def download_page(url):
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         return response.text
-    except Exception as e:
-        print(f"Chyba při stahování {url}: {e}")
+    except requests.RequestException as e:
+        print(f"Chyba při stahování stránky: {e}")
         return None
 
-def parse_article(url, html):
-    """Zpracuje obsah stránky a vyparsuje požadovaná data."""
-    soup = BeautifulSoup(html, "html.parser")
+
+# Funkce pro extrakci informací z článku
+def extract_article_data(soup, url):
     try:
-        # Nadpis
-        title = soup.find("h1").get_text(strip=True)
-        # Kategorie
-        category = soup.find("meta", {"name": "category"})["content"] if soup.find("meta", {"name": "category"}) else "Neznámá"
-        # Počet komentářů
-        comments = soup.find("span", class_="comments-count").get_text(strip=True) if soup.find("span", class_="comments-count") else "0"
-        # Počet fotek
-        photos = len(soup.find_all("img"))
-        # Obsah
-        content = " ".join(p.get_text(strip=True) for p in soup.find_all("p"))
+        title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Neznámý nadpis"
+        category = soup.find("meta", attrs={"name": "category"})["content"] if soup.find("meta", attrs={
+            "name": "category"}) else "Neznámá kategorie"
+        comments_count = soup.find("span", class_="comments-count").get_text(strip=True) if soup.find("span",
+                                                                                                      class_="comments-count") else "0"
+        photos_count = len(soup.find_all("img"))
+        content = " ".join([p.get_text(strip=True) for p in soup.find_all("p")])
+        date = soup.find("time")["datetime"] if soup.find("time") else "Neznámé datum"
 
         return {
             "url": url,
             "title": title,
             "category": category,
-            "comments": int(comments),
-            "photos": photos,
+            "comments_count": comments_count,
+            "photos_count": photos_count,
             "content": content,
+            "date": date
         }
     except Exception as e:
-        print(f"Chyba při parsování {url}: {e}")
+        print(f"Chyba při extrakci dat z článku: {e}")
         return None
 
-def get_links(html):
-    """Najde všechny odkazy na stránce."""
-    soup = BeautifulSoup(html, "html.parser")
-    links = []
+
+# Funkce pro extrakci odkazů pouze z `base_url`
+def extract_links(soup, base_url):
+    links = set()
+    base_netloc = urlparse(base_url).netloc  # Kořen domény
     for a_tag in soup.find_all("a", href=True):
-        href = a_tag["href"]
-        print(f"Zpracovávám odkaz: {href}")  # Debug výpis odkazu
-        if href.startswith("/") or href.startswith("https://www.novinky.cz"):
-            # Pokud je odkaz interní nebo na novinky.cz, vynecháme ho
-            continue
-        if href.startswith("https://www.ceskenoviny.cz"):
-            links.append(href)
+        href = urljoin(base_url, a_tag["href"])  # Normalizace odkazu
+        if urlparse(href).netloc == base_netloc:  # Kontrola, zda je odkaz na stejné doméně
+            links.add(href)
     return links
 
 
+# Funkce pro kontrolu velikosti souboru
+def is_file_size_exceeded(file_path, max_size):
+    if os.path.exists(file_path):
+        return os.path.getsize(file_path) >= max_size
+    return False
 
-def print_last_saved_article(article):
-    """Vypíše poslední uložený článek."""
-    print("\nPoslední uložený článek:")
-    print(f"Nadpis: {article['title']}")
-    print(f"Kategorie: {article['category']}")
-    print(f"Počet komentářů: {article['comments']}")
-    print(f"Počet fotek: {article['photos']}")
-    print(f"Obsah: {article['content'][:500]}...")  # Zkrácený obsah
-    print(f"Odkaz: {article['url']}")
-    print("-" * 40)
 
-def print_links_from_page(html):
-    """Vypíše odkazy <a> nalezené na stránce."""
-    links = get_links(html)
-    print("\nOdkazy nalezené na stránce:")
-    for link in links:
-        print(link)
-    print("-" * 40)
+# Hlavní funkce crawleru
+def crawler(start_url, output_file, max_file_size=1 * 1024 * 1024 * 1024):  # 1 GB
+    visited = set()
+    queue = deque([start_url])
+    articles = []
 
-MAX_ARTICLES = 10  # Maximální počet článků ke zpracování
-articles_processed = 0  # Počet zpracovaných článků
+    while queue:
+        # Kontrola velikosti souboru
+        if is_file_size_exceeded(output_file, max_file_size):
+            print("Soubor dosáhl maximální velikosti 1 GB. Ukončuji crawler.")
+            break
 
-# Hlavní smyčka crawleru
-while link_queue and articles_processed < MAX_ARTICLES:
-    current_link = link_queue.pop(0)
-    if current_link in visited_links:
-        continue
+        url = queue.popleft()
+        if url in visited:
+            continue
+        print(f"Zpracovávám: {url}")
+        visited.add(url)
 
-    print(f"Zpracovávám: {current_link}")
-    visited_links.add(current_link)
+        html_content = download_page(url)
+        if not html_content:
+            continue
 
-    page_content = fetch_page(current_link)
-    if not page_content:
-        continue
+        soup = BeautifulSoup(html_content, "html.parser")
 
-    # Parsování článku
-    article_data = parse_article(current_link, page_content)
-    if article_data:
-        articles.append(article_data)
-        print_last_saved_article(article_data)  # Výpis posledního uloženého článku
-        articles_processed += 1
+        # Pokud je článek, extrahujeme data
+        article_data = extract_article_data(soup, url)
+        if article_data:
+            articles.append(article_data)
 
-    # Výpis odkazů na stránce
-    print_links_from_page(page_content)
+        # Ukládání do souboru a kontrola velikosti
+        with open(output_file, "a", encoding="utf-8") as f:
+            json.dump(article_data, f, ensure_ascii=False)
+            f.write("\n")  # Oddělíme JSON objekty novým řádkem
 
-    # Získání dalších odkazů
-    new_links = get_links(page_content)
-    link_queue.extend(new_links)
+        # Přidáváme nové odkazy do fronty (kontrolujeme, že jsou na stejné doméně)
+        links = extract_links(soup, start_url)
+        queue.extend(links - visited)
 
-    # Uložení po každých 100 článcích
-    if len(articles) % 100 == 0:
-        with open("articles.json", "w", encoding="utf-8") as f:
-            json.dump(articles, f, ensure_ascii=False, indent=4)
-        print("Uloženo 100 článků!")
 
-# Konečné uložení dat
-with open("articles.json", "w", encoding="utf-8") as f:
-    json.dump(articles, f, ensure_ascii=False, indent=4)
-print(f"Uloženo celkem {len(articles)} článků.")
-
+# Spuštění crawleru
+if __name__ == "__main__":
+    start_url = "https://www.idnes.cz/"  # Počáteční stránka
+    output_file = "articles.json"
+    crawler(start_url, output_file)
